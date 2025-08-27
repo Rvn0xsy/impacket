@@ -95,7 +95,7 @@ class SMBConnection:
     def negotiateSession(self, preferredDialect=None,
                          flags1=smb.SMB.FLAGS1_PATHCASELESS | smb.SMB.FLAGS1_CANONICALIZED_PATHS,
                          flags2=smb.SMB.FLAGS2_EXTENDED_SECURITY | smb.SMB.FLAGS2_NT_STATUS | smb.SMB.FLAGS2_LONG_NAMES,
-                         negoData='\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2.???\x00'):
+                         negoData = '\x02PC NETWORK PROGRAM 1.0\x00\x02LANMAN1.0\x00\x02Windows for Workgroups 3.1a\x00\x02LM1.2X002\x00\x02LANMAN2.1\x00\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2\x2e\x3f\x3f\x3f\x00'):
         """
         Perform SMB protocol negotiation.
 
@@ -126,8 +126,20 @@ class SMBConnection:
                 self._remoteName = res
 
         if self._sess_port == nmb.NETBIOS_SESSION_PORT:
-            negoData = '\x02NT LM 0.12\x00\x02SMB 2.002\x00'
+            """
+            PSEXEC handshaking data:
 
+            0000   00 78 00 02 50 43 20 4e 45 54 57 4f 52 4b 20 50   .x..PC NETWORK P
+            0010   52 4f 47 52 41 4d 20 31 2e 30 00 02 4c 41 4e 4d   ROGRAM 1.0..LANM
+            0020   41 4e 31 2e 30 00 02 57 69 6e 64 6f 77 73 20 66   AN1.0..Windows f
+            0030   6f 72 20 57 6f 72 6b 67 72 6f 75 70 73 20 33 2e   or Workgroups 3.
+            0040   31 61 00 02 4c 4d 31 2e 32 58 30 30 32 00 02 4c   1a..LM1.2X002..L
+            0050   41 4e 4d 41 4e 32 2e 31 00 02 4e 54 20 4c 4d 20   ANMAN2.1..NT LM 
+            0060   30 2e 31 32 00 02 53 4d 42 20 32 2e 30 30 32 00   0.12..SMB 2.002.
+            0070   02 53 4d 42 20 32 2e 3f 3f 3f 00                  .SMB 2.???.
+            """
+            # negoData = '\x02NT LM 0.12\x00\x02SMB 2.002\x00'
+            negoData = '\x02PC NETWORK PROGRAM 1.0\x00\x02LANMAN1.0\x00\x02Windows for Workgroups 3.1a\x00\x02LM1.2X002\x00\x02LANMAN2.1\x00\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2\x2e\x3f\x3f\x3f\x00'
         hostType = nmb.TYPE_SERVER
         if preferredDialect is None:
             # If no preferredDialect sent, we try the highest available one.
