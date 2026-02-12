@@ -220,7 +220,9 @@ class SMB3:
         self.RequireMessageSigning = False  #
         self.ConnectionTable = {}
         self.GlobalFileTable = {}
-        self.ClientGuid = os.urandom(16)
+        self.ClientGuid = os.urandom(
+            16
+        )  # TODO: Make this stable based on hostname for stealth
         # Only for SMB 3.0
         self.EncryptionAlgorithmList = ["AES-CCM"]
         self.MaxDialect = []
@@ -510,9 +512,12 @@ class SMB3:
         if ("CreditCharge" in packet.fields) is False:
             packet["CreditCharge"] = 1
 
-        # Standard credit request after negotiating protocol
-        if self._Connection["SequenceWindow"] > 3:
-            packet["CreditRequestResponse"] = 127
+        # Credit request: match Windows behavior
+        # Negotiate (SequenceWindow <= 1): 0 credits (default)
+        # Session Setup and early packets: 33 credits
+        # After session established: 33 credits (Windows steady-state)
+        if self._Connection["SequenceWindow"] > 1:
+            packet["CreditRequestResponse"] = 33
 
         messageId = packet["MessageID"]
 
@@ -528,10 +533,10 @@ class SMB3:
                     self._Session["TreeConnectTable"][packet["TreeID"]]["EncryptData"]
                     is False
                 ):
-                    packet["Flags"] = SMB2_FLAGS_SIGNED
+                    packet["Flags"] |= SMB2_FLAGS_SIGNED
                     self.signSMB(packet)
             elif packet["TreeID"] == 0:
-                packet["Flags"] = SMB2_FLAGS_SIGNED
+                packet["Flags"] |= SMB2_FLAGS_SIGNED
                 self.signSMB(packet)
 
         if packet["Command"] is SMB2_NEGOTIATE:
@@ -690,7 +695,9 @@ class SMB3:
                     negotiateContext["Data"] = preAuthIntegrityCapabilities.getData()
                     negotiateContext["DataLength"] = len(negotiateContext["Data"])
                     contextData["NegotiateContextCount"] += 1
-                    pad = b"\xff" * ((8 - (negotiateContext["DataLength"] % 8)) % 8)
+                    pad = b"\x00" * (
+                        (8 - (negotiateContext["DataLength"] % 8)) % 8
+                    )  # Use standard null padding like Windows
 
                     # Add an SMB2_NEGOTIATE_CONTEXT with ContextType as SMB2_ENCRYPTION_CAPABILITIES
                     # to the negotiate request as specified in section 2.2.3.1 and initialize
@@ -706,7 +713,7 @@ class SMB3:
                     negotiateContext2["Data"] = encryptionCapabilities.getData()
                     negotiateContext2["DataLength"] = len(negotiateContext2["Data"])
                     contextData["NegotiateContextCount"] += 1
-                    pad_encryption = b"\xff" * (
+                    pad_encryption = b"\x00" * (
                         (8 - (negotiateContext2["DataLength"] % 8)) % 8
                     )
 
@@ -730,7 +737,7 @@ class SMB3:
                     negotiateContext3["Data"] = compressionCapabilities.getData()
                     negotiateContext3["DataLength"] = len(negotiateContext3["Data"])
                     contextData["NegotiateContextCount"] += 1
-                    pad_compression = b"\xff" * (
+                    pad_compression = b"\x00" * (
                         (8 - (negotiateContext3["DataLength"] % 8)) % 8
                     )
 
@@ -739,16 +746,19 @@ class SMB3:
                     negotiateContext4["ContextType"] = SMB2_NETNAME_NEGOTIATE_CONTEXT_ID
 
                     netNameNegotiateContext = SMB2NetNameNegotiateContextID()
+                    netNameNegotiateContext["NetName"] = self._Connection[
+                        "ServerName"
+                    ].encode("utf-16le")
 
                     negotiateContext4["Data"] = netNameNegotiateContext.getData()
                     negotiateContext4["DataLength"] = len(negotiateContext4["Data"])
                     contextData["NegotiateContextCount"] += 1
-                    pad_netname = b"\xff" * (
+                    pad_netname = b"\x00" * (
                         (8 - (negotiateContext4["DataLength"] % 8)) % 8
                     )
 
                     negSession["ClientStartTime"] = contextData.getData()
-                    negSession["Padding"] = b"\xff\xff"
+                    negSession["Padding"] = b"\x00\x00"
                     # Subsequent negotiate contexts MUST appear at the first 8-byte aligned offset following the
                     # previous negotiate context.
                     negSession["NegotiateContextList"] = (
@@ -770,7 +780,80 @@ class SMB3:
                     SMB2_DIALECT_002,
                     SMB2_DIALECT_21,
                     SMB2_DIALECT_30,
+                    SMB2_DIALECT_302,
+                    SMB2_DIALECT_311,
                 ]
+
+                contextData = SMB311ContextData()
+                dialectListSize = len(negSession["Dialects"]) * 2
+                negotiateBodySize = 36 + dialectListSize
+                totalBeforePad = 64 + negotiateBodySize
+                padSize = (8 - (totalBeforePad % 8)) % 8
+                contextData["NegotiateContextOffset"] = totalBeforePad + padSize
+                contextData["NegotiateContextCount"] = 0
+
+                negotiateContext = SMB2NegotiateContext()
+                negotiateContext["ContextType"] = SMB2_PREAUTH_INTEGRITY_CAPABILITIES
+                preAuthIntegrityCapabilities = SMB2PreAuthIntegrityCapabilities()
+                preAuthIntegrityCapabilities["HashAlgorithmCount"] = 1
+                preAuthIntegrityCapabilities["SaltLength"] = 32
+                preAuthIntegrityCapabilities["HashAlgorithms"] = b"\x01\x00"
+                preAuthIntegrityCapabilities["Salt"] = os.urandom(32)
+                negotiateContext["Data"] = preAuthIntegrityCapabilities.getData()
+                negotiateContext["DataLength"] = len(negotiateContext["Data"])
+                contextData["NegotiateContextCount"] += 1
+                pad = b"\x00" * ((8 - (negotiateContext["DataLength"] % 8)) % 8)
+
+                negotiateContext2 = SMB2NegotiateContext()
+                negotiateContext2["ContextType"] = SMB2_ENCRYPTION_CAPABILITIES
+                encryptionCapabilities = SMB2EncryptionCapabilities()
+                encryptionCapabilities["CipherCount"] = 1
+                encryptionCapabilities["Ciphers"] = b"\x01\x00"
+                negotiateContext2["Data"] = encryptionCapabilities.getData()
+                negotiateContext2["DataLength"] = len(negotiateContext2["Data"])
+                contextData["NegotiateContextCount"] += 1
+                pad2 = b"\x00" * ((8 - (negotiateContext2["DataLength"] % 8)) % 8)
+
+                negotiateContext3 = SMB2NegotiateContext()
+                negotiateContext3["ContextType"] = SMB2_COMPRESSION_CAPABILITIES
+                compressionCapabilities = SMB2CompressionCapabilities()
+                compressionCapabilities["CompressionAlgorithmCount"] = 4
+                compressionCapabilities["Flags"] = (
+                    SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED
+                )
+                compressionCapabilities["CompressionAlgorithms"] = struct.pack(
+                    "<HHHH",
+                    COMPRESSION_ALGORITHM_LZNT1,
+                    COMPRESSION_ALGORITHM_LZ77,
+                    COMPRESSION_ALGORITHM_LZ77_HUFFMAN,
+                    COMPRESSION_ALGORITHM_PATTERN_V1,
+                )
+                negotiateContext3["Data"] = compressionCapabilities.getData()
+                negotiateContext3["DataLength"] = len(negotiateContext3["Data"])
+                contextData["NegotiateContextCount"] += 1
+                pad3 = b"\x00" * ((8 - (negotiateContext3["DataLength"] % 8)) % 8)
+
+                negotiateContext4 = SMB2NegotiateContext()
+                negotiateContext4["ContextType"] = SMB2_NETNAME_NEGOTIATE_CONTEXT_ID
+                netNameContext = SMB2NetNameNegotiateContextID()
+                netNameContext["NetName"] = self._Connection["ServerName"].encode(
+                    "utf-16le"
+                )
+                negotiateContext4["Data"] = netNameContext.getData()
+                negotiateContext4["DataLength"] = len(negotiateContext4["Data"])
+                contextData["NegotiateContextCount"] += 1
+
+                negSession["ClientStartTime"] = contextData.getData()
+                negSession["Padding"] = b"\x00" * padSize
+                negSession["NegotiateContextList"] = (
+                    negotiateContext.getData()
+                    + pad
+                    + negotiateContext2.getData()
+                    + pad2
+                    + negotiateContext3.getData()
+                    + pad3
+                    + negotiateContext4.getData()
+                )
             negSession["DialectCount"] = len(negSession["Dialects"])
             packet["Data"] = negSession
 
@@ -895,7 +978,7 @@ class SMB3:
             sessionSetup["SecurityMode"] = SMB2_NEGOTIATE_SIGNING_ENABLED
 
         sessionSetup["Flags"] = 0
-        # sessionSetup['Capabilities'] = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_LEASING | SMB2_GLOBAL_CAP_DFS
+        sessionSetup["Capabilities"] = SMB2_GLOBAL_CAP_DFS
 
         # Importing down here so pyasn1 is not required if kerberos is not used.
         from impacket.krb5.asn1 import AP_REQ, Authenticator, TGS_REP, seq_set
@@ -1200,7 +1283,7 @@ class SMB3:
             sessionSetup["SecurityMode"] = SMB2_NEGOTIATE_SIGNING_ENABLED
 
         sessionSetup["Flags"] = 0
-        # sessionSetup['Capabilities'] = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_LEASING | SMB2_GLOBAL_CAP_DFS
+        sessionSetup["Capabilities"] = SMB2_GLOBAL_CAP_DFS
 
         # Let's build a NegTokenInit with the NTLMSSP
         # TODO: In the future we should be able to choose different providers
@@ -1211,10 +1294,6 @@ class SMB3:
         blob["MechTypes"] = [
             TypesMech["NTLMSSP - Microsoft NTLM Security Support Provider"]
         ]
-        auth = ntlm.getNTLMSSPType1(
-            self._Connection["ClientName"], domain, self._Connection["RequireSigning"]
-        )
-
         auth = ntlm.getNTLMSSPType1(
             self._Connection["ClientName"], domain, self._Connection["RequireSigning"]
         )

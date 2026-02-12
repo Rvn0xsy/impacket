@@ -29,6 +29,7 @@ from impacket.smb3structs import (
     SMB2_DIALECT_002,
     SMB2_DIALECT_21,
     SMB2_DIALECT_30,
+    SMB2_DIALECT_302,
     SMB2_DIALECT_311,
 )
 
@@ -124,8 +125,9 @@ class SMBConnection:
         flags1=smb.SMB.FLAGS1_PATHCASELESS | smb.SMB.FLAGS1_CANONICALIZED_PATHS,
         flags2=smb.SMB.FLAGS2_EXTENDED_SECURITY
         | smb.SMB.FLAGS2_NT_STATUS
-        | smb.SMB.FLAGS2_LONG_NAMES,
-        negoData="\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2\x2e\x3f\x3f\x3f\x00",
+        | smb.SMB.FLAGS2_LONG_NAMES
+        | smb.SMB.FLAGS2_UNICODE,
+        negoData=b"\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2.???\x00",
     ):
         """
         Perform SMB protocol negotiation.
@@ -170,26 +172,15 @@ class SMBConnection:
             0040   31 61 00 02 4c 4d 31 2e 32 58 30 30 32 00 02 4c   1a..LM1.2X002..L
             0050   41 4e 4d 41 4e 32 2e 31 00 02 4e 54 20 4c 4d 20   ANMAN2.1..NT LM 
             0060   30 2e 31 32 00 02 53 4d 42 20 32 2e 30 30 32 00   0.12..SMB 2.002.
-            0070   02 53 4d 42 20 32 2e 3f 3f 3f 00                  .SMB 2.???.
+            0070   02 53 4d 42 20 32 2e 3f 3f 3f 00                  .SMB 2.1.
             """
             # negoData = '\x02NT LM 0.12\x00\x02SMB 2.002\x00'
             negoData = "\x02PC NETWORK PROGRAM 1.0\x00\x02LANMAN1.0\x00\x02Windows for Workgroups 3.1a\x00\x02LM1.2X002\x00\x02LANMAN2.1\x00\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2\x2e\x3f\x3f\x3f\x00"
         hostType = nmb.TYPE_SERVER
         if preferredDialect is None:
-            # If no preferredDialect sent, we try the highest available one.
-            packet = self.negotiateSessionWildcard(
-                self._myName,
-                self._remoteName,
-                self._remoteHost,
-                self._sess_port,
-                self._timeout,
-                True,
-                flags1=flags1,
-                flags2=flags2,
-                data=negoData,
-            )
-            if packet[0:1] == b"\xfe":
-                # Answer is SMB2 packet
+            if self._sess_port == nmb.SMB_SESSION_PORT:
+                # Port 445: Go directly to SMB2/3 negotiate (like Windows clients).
+                # This avoids the SMB1 COM_NEGOTIATE fingerprint.
                 self._SMBConnection = smb3.SMB3(
                     self._remoteName,
                     self._remoteHost,
@@ -197,21 +188,44 @@ class SMBConnection:
                     hostType,
                     self._sess_port,
                     self._timeout,
-                    session=self._nmbSession,
-                    negSessionResponse=smb3structs.SMB2Packet(packet),
                 )
             else:
-                # Answer is SMB packet, sticking to SMBv1
-                self._SMBConnection = smb.SMB(
+                # Port 139 (NetBIOS): Use SMB1 wildcard negotiate for backward compat
+                packet = self.negotiateSessionWildcard(
+                    self._myName,
                     self._remoteName,
                     self._remoteHost,
-                    self._myName,
-                    hostType,
                     self._sess_port,
                     self._timeout,
-                    session=self._nmbSession,
-                    negPacket=packet,
+                    True,
+                    flags1=flags1,
+                    flags2=flags2,
+                    data=negoData,
                 )
+                if packet[0:1] == b"\xfe":
+                    # Answer is SMB2 packet
+                    self._SMBConnection = smb3.SMB3(
+                        self._remoteName,
+                        self._remoteHost,
+                        self._myName,
+                        hostType,
+                        self._sess_port,
+                        self._timeout,
+                        session=self._nmbSession,
+                        negSessionResponse=smb3structs.SMB2Packet(packet),
+                    )
+                else:
+                    # Answer is SMB packet, sticking to SMBv1
+                    self._SMBConnection = smb.SMB(
+                        self._remoteName,
+                        self._remoteHost,
+                        self._myName,
+                        hostType,
+                        self._sess_port,
+                        self._timeout,
+                        session=self._nmbSession,
+                        negPacket=packet,
+                    )
         else:
             if preferredDialect == smb.SMB_DIALECT:
                 self._SMBConnection = smb.SMB(
@@ -226,6 +240,7 @@ class SMBConnection:
                 SMB2_DIALECT_002,
                 SMB2_DIALECT_21,
                 SMB2_DIALECT_30,
+                SMB2_DIALECT_302,
                 SMB2_DIALECT_311,
             ]:
                 self._SMBConnection = smb3.SMB3(
