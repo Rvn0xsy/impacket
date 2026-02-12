@@ -220,9 +220,7 @@ class SMB3:
         self.RequireMessageSigning = False  #
         self.ConnectionTable = {}
         self.GlobalFileTable = {}
-        self.ClientGuid = "".join(
-            [random.choice(string.ascii_letters) for i in range(16)]
-        )
+        self.ClientGuid = os.urandom(16)
         # Only for SMB 3.0
         self.EncryptionAlgorithmList = ["AES-CCM"]
         self.MaxDialect = []
@@ -551,16 +549,14 @@ class SMB3:
         ):
             plainText = packet.getData()
             transformHeader = SMB2_TRANSFORM_HEADER()
-            transformHeader["Nonce"] = "".join(
-                [rand.choice(string.ascii_letters) for _ in range(11)]
-            )
+            transformHeader["Nonce"] = os.urandom(11)
             transformHeader["OriginalMessageSize"] = len(plainText)
             transformHeader["EncryptionAlgorithm"] = SMB2_ENCRYPTION_AES128_CCM
             transformHeader["SessionID"] = self._Session["SessionID"]
             cipher = AES.new(
                 self._Session["EncryptionKey"],
                 AES.MODE_CCM,
-                b(transformHeader["Nonce"]),
+                transformHeader["Nonce"],
             )
             cipher.update(transformHeader.getData()[20:])
             cipherText = cipher.encrypt(plainText)
@@ -644,7 +640,15 @@ class SMB3:
         self._Connection["ClientSecurityMode"] = SMB2_NEGOTIATE_SIGNING_ENABLED
         if self.RequireMessageSigning is True:
             self._Connection["ClientSecurityMode"] |= SMB2_NEGOTIATE_SIGNING_REQUIRED
-        self._Connection["Capabilities"] = SMB2_GLOBAL_CAP_ENCRYPTION
+        self._Connection["Capabilities"] = (
+            SMB2_GLOBAL_CAP_DFS
+            | SMB2_GLOBAL_CAP_LEASING
+            | SMB2_GLOBAL_CAP_LARGE_MTU
+            | SMB2_GLOBAL_CAP_MULTI_CHANNEL
+            | SMB2_GLOBAL_CAP_PERSISTENT_HANDLES
+            | SMB2_GLOBAL_CAP_DIRECTORY_LEASING
+            | SMB2_GLOBAL_CAP_ENCRYPTION
+        )
         currentDialect = SMB2_DIALECT_WILDCARD
 
         # Do we have a negSessionPacket already?
@@ -702,13 +706,60 @@ class SMB3:
                     negotiateContext2["Data"] = encryptionCapabilities.getData()
                     negotiateContext2["DataLength"] = len(negotiateContext2["Data"])
                     contextData["NegotiateContextCount"] += 1
+                    pad_encryption = b"\xff" * (
+                        (8 - (negotiateContext2["DataLength"] % 8)) % 8
+                    )
+
+                    # Build the SMB2_COMPRESSION_CAPABILITIES
+                    negotiateContext3 = SMB2NegotiateContext()
+                    negotiateContext3["ContextType"] = SMB2_COMPRESSION_CAPABILITIES
+
+                    compressionCapabilities = SMB2CompressionCapabilities()
+                    compressionCapabilities["CompressionAlgorithmCount"] = 4
+                    compressionCapabilities["Flags"] = (
+                        SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED
+                    )
+                    compressionCapabilities["CompressionAlgorithms"] = struct.pack(
+                        "<HHHH",
+                        COMPRESSION_ALGORITHM_LZNT1,
+                        COMPRESSION_ALGORITHM_LZ77,
+                        COMPRESSION_ALGORITHM_LZ77_HUFFMAN,
+                        COMPRESSION_ALGORITHM_PATTERN_V1,
+                    )
+
+                    negotiateContext3["Data"] = compressionCapabilities.getData()
+                    negotiateContext3["DataLength"] = len(negotiateContext3["Data"])
+                    contextData["NegotiateContextCount"] += 1
+                    pad_compression = b"\xff" * (
+                        (8 - (negotiateContext3["DataLength"] % 8)) % 8
+                    )
+
+                    # Build the SMB2_NETNAME_NEGOTIATE_CONTEXT_ID
+                    negotiateContext4 = SMB2NegotiateContext()
+                    negotiateContext4["ContextType"] = SMB2_NETNAME_NEGOTIATE_CONTEXT_ID
+
+                    netNameNegotiateContext = SMB2NetNameNegotiateContextID()
+
+                    negotiateContext4["Data"] = netNameNegotiateContext.getData()
+                    negotiateContext4["DataLength"] = len(negotiateContext4["Data"])
+                    contextData["NegotiateContextCount"] += 1
+                    pad_netname = b"\xff" * (
+                        (8 - (negotiateContext4["DataLength"] % 8)) % 8
+                    )
 
                     negSession["ClientStartTime"] = contextData.getData()
                     negSession["Padding"] = b"\xff\xff"
                     # Subsequent negotiate contexts MUST appear at the first 8-byte aligned offset following the
                     # previous negotiate context.
                     negSession["NegotiateContextList"] = (
-                        negotiateContext.getData() + pad + negotiateContext2.getData()
+                        negotiateContext.getData()
+                        + pad
+                        + negotiateContext2.getData()
+                        + pad_encryption
+                        + negotiateContext3.getData()
+                        + pad_compression
+                        + negotiateContext4.getData()
+                        + pad_netname
                     )
 
                     # Do you want to enforce encryption? Uncomment here:
@@ -1163,6 +1214,10 @@ class SMB3:
         auth = ntlm.getNTLMSSPType1(
             self._Connection["ClientName"], domain, self._Connection["RequireSigning"]
         )
+
+        auth = ntlm.getNTLMSSPType1(
+            self._Connection["ClientName"], domain, self._Connection["RequireSigning"]
+        )
         blob["MechToken"] = auth.getData()
 
         sessionSetup["SecurityBufferLength"] = len(blob)
@@ -1533,13 +1588,13 @@ class SMB3:
             # Is this file NOT on the root directory?
             if len(fileName.split("\\")) > 2:
                 parentDir = ntpath.dirname(pathName)
-            if parentDir in self.GlobalFileTable:
-                raise Exception("Don't know what to do now! :-o")
-            else:
-                parentEntry = copy.deepcopy(FILE)
-                parentEntry["LeaseKey"] = uuid.generate()
-                parentEntry["LeaseState"] = SMB2_LEASE_NONE
-                self.GlobalFileTable[parentDir] = parentEntry
+                if parentDir in self.GlobalFileTable:
+                    raise Exception("Don't know what to do now! :-o")
+                else:
+                    parentEntry = copy.deepcopy(FILE)
+                    parentEntry["LeaseKey"] = uuid.generate()
+                    parentEntry["LeaseState"] = SMB2_LEASE_NONE
+                    self.GlobalFileTable[parentDir] = parentEntry
 
         packet = self.SMB_PACKET()
         packet["Command"] = SMB2_CREATE
